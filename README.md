@@ -1,2 +1,2 @@
 # levelshifter
-Converter for lvllvl JSON files
+Parser and converter for lvllvl files.
