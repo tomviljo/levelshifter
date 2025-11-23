@@ -1,6 +1,6 @@
 import argparse
-import copy
 import json
+import re
 import struct
 import sys
 
@@ -71,15 +71,16 @@ class Slicer:
 #
 
 class Screen:
-    TRANSPARENT_BG = 255
-    TRANSPARENT_CH = 32
+    TRANSPARENT_BACKGROUND = 255
+    TRANSPARENT_TILE = 32
 
     def __init__(self, width, height):
         self.width = width
         self.height = height
-        self.bg = bytearray(width * height)
-        self.fg = bytearray(width * height)
-        self.ch = bytearray(width * height)
+        self.background = bytearray(width * height)
+        self.foreground = bytearray(width * height)
+        self.tag = bytearray(width * height)
+        self.tile = bytearray(width * height)
 
     def count(self):
         return self.width * self.height
@@ -88,30 +89,33 @@ class Screen:
         return y * self.width + x
 
     def get(self, index):
-        return self.bg[index], self.fg[index], self.ch[index]
+        return self.background[index], self.foreground[index], self.tag[index], self.tile[index]
 
     def get_text(self, index, length):
-        return bytes(self.ch[index : index + length])
+        return bytes(self.tile[index : index + length])
 
-    def set(self, index, bg, fg, ch):
-        self.bg[index] = bg
-        self.fg[index] = fg
-        self.ch[index] = ch
+    def set(self, index, background, foreground, tag, tile):
+        self.background[index] = background
+        self.foreground[index] = foreground
+        self.tag[index] = tag
+        self.tile[index] = tile
 
     def apply(self, other):
         for index in range(self.count()):
-            if other.bg[index] != self.TRANSPARENT_BG:
+            if other.background[index] != self.TRANSPARENT_BACKGROUND:
                 # Opaque background
-                self.bg[index] = other.bg[index]
-                self.fg[index] = other.fg[index]
-                self.ch[index] = other.ch[index]
-            elif other.ch[index] != self.TRANSPARENT_CH:
-                # Non-transparent character with transparent background
-                self.fg[index] = other.fg[index]
-                self.ch[index] = other.ch[index]
+                self.background[index] = other.background[index]
+                self.foreground[index] = other.foreground[index]
+                self.tag[index] = other.tag[index]
+                self.tile[index] = other.tile[index]
+            elif other.tile[index] != self.TRANSPARENT_TILE:
+                # Non-transparent tile with transparent background
+                self.foreground[index] = other.foreground[index]
+                self.tag[index] = other.tag[index]
+                self.tile[index] = other.tile[index]
 
     @classmethod
-    def from_lvl(cls, tree, width, height):
+    def from_lvl(cls, tree, width, height, tag):
         screen = cls(width, height)
 
         if len(tree['data']) != height:
@@ -121,7 +125,7 @@ class Screen:
                 raise ValueError(f"Expected {width} columns, got {len(row)}")
             for x, col in enumerate(row):
                 # lvllvl uses -1 for transparency, -1 & 0xff is 0xff
-                screen.set(screen.index(x, y), col['bc'] & 0xff, col['fc'], col['t'])
+                screen.set(screen.index(x, y), col['bc'] & 0xff, col['fc'], tag, col['t'])
 
         return screen
 
@@ -129,27 +133,31 @@ class ScreenWriter:
     def __init__(self, screen):
         self.screen = screen
         self.index = 0
-        self.bg = None
-        self.fg = None
+        self.background = None
+        self.foreground = None
+        self.tag = 0
 
     def set_transparent(self):
-        self.bg = Screen.TRANSPARENT_BG
+        self.background = Screen.TRANSPARENT_BACKGROUND
 
     def set_background(self, color):
-        self.bg = color
+        self.background = color
 
     def set_foreground(self, color):
-        self.fg = color
+        self.foreground = color
+
+    def set_tag(self, tag):
+        self.tag = tag
 
     def skip(self, count):
         self.index += count
 
-    def write(self, char):
-        if self.bg is None:
+    def write(self, tile):
+        if self.background is None:
             raise ValueError('Background color not set')
-        if self.fg is None:
+        if self.foreground is None:
             raise ValueError('Foreground color not set')
-        self.screen.set(self.index, self.bg, self.fg, char)
+        self.screen.set(self.index, self.background, self.foreground, self.tag, tile)
         self.index += 1
 
 class ScreenAnalyzer:
@@ -178,19 +186,19 @@ class ScreenAnalyzer:
                 skip_count = 0
             if i:
                 # Compare this cell with next
-                bg_a, fg_a, ch_a = self.screen.get(index)
-                bg_b, fg_b, ch_b = self.screen.get(index + 1)
-                if bg_a == bg_b and fg_a == fg_b:
-                    # Unchanged color, can be part of same run
+                background_a, foreground_a, tag_a, tile_a = self.screen.get(index)
+                background_b, foreground_b, tag_b, tile_b = self.screen.get(index + 1)
+                if background_a == background_b and foreground_a == foreground_b and tag_a == tag_b:
+                    # Unchanged properties, can be part of same run
                     run_count += 1
-                    if ch_a == ch_b:
-                        # Also unchanged char, can be part of same fill
+                    if tile_a == tile_b:
+                        # Also unchanged tile, can be part of same fill
                         fill_count += 1
                     else:
-                        # Changed char, breaks fill
+                        # Changed tile, breaks fill
                         fill_count = 1
                 else:
-                    # Changed color, breaks runs and fills
+                    # Changed properties, breaks runs and fills
                     run_count = 1
                     fill_count = 1
             else:
@@ -206,18 +214,19 @@ class ScreenAnalyzer:
     def commands(self):
         commands = []
         index = 0
-        last_bg = None
-        last_fg = None
+        last_background = None
+        last_foreground = None
+        last_tag = 0
 
         while index < self.screen.count():
-            bg, fg, ch = self.screen.get(index)
+            background, foreground, tag, tile = self.screen.get(index)
 
             if self.skip_len[index]:
                 count = min(self.skip_len[index], 4096)
                 command = LVSCommandSkip(count - 1)
             elif self.fill_len[index] >= 3:
                 count = min(self.fill_len[index], 4096)
-                command = LVSCommandFill(count - 1, ch)
+                command = LVSCommandFill(count - 1, tile)
             else:
                 count = min(self.run_len[index], 4096)
                 # Look for skip or fill opportunity inside run
@@ -229,17 +238,20 @@ class ScreenAnalyzer:
                 command = LVSCommandRun(self.screen.get_text(index, count))
             index += count
 
-            # Make sure colors are up to date before adding character command
+            # Make sure properties are up to date before adding tile command
             if not isinstance(command, LVSCommandSkip):
-                if bg != last_bg:
-                    if bg == Screen.TRANSPARENT_BG:
+                if background != last_background:
+                    if background == Screen.TRANSPARENT_BACKGROUND:
                         commands.append(LVSCommandTransparent())
                     else:
-                        commands.append(LVSCommandBackground(bg))
-                    last_bg = bg
-                if fg != last_fg:
-                    commands.append(LVSCommandForeground(fg))
-                    last_fg = fg
+                        commands.append(LVSCommandBackground(background))
+                    last_background = background
+                if foreground != last_foreground:
+                    commands.append(LVSCommandForeground(foreground))
+                    last_foreground = foreground
+                if tag != last_tag:
+                    commands.append(LVSCommandTag(tag))
+                    last_tag = tag
 
             commands.append(command)
 
@@ -253,7 +265,8 @@ def lvs_decode(slicer, subtypes):
     chunks = []
 
     while slicer.length():
-        signature, body_length = slicer.unpack(LVSChunk.CHUNK_STRUCT)
+        signature, length = slicer.unpack(LVSChunk.CHUNK_STRUCT)
+        body_length = length - LVSChunk.CHUNK_STRUCT.size
         if body_length & 1:
             raise ValueError('Chunk body has odd length')
 
@@ -268,56 +281,39 @@ def lvs_decode(slicer, subtypes):
 
     return chunks
 
-class LVSChunk:
-    '''Base class, do not instantiate'''
-
-    CHUNK_STRUCT = struct.Struct('> 4s L')
-
-    def body_to_bytes(self):
-        raise NotImplementedError()
-
-    def to_bytes(self):
-        body = self.body_to_bytes()
-
-        # Add padding if odd size
-        if len(body) & 1:
-            body += b'\x00'
-
-        return self.CHUNK_STRUCT.pack(self.SIGNATURE, len(body)) + body
-
-class LVSFile(LVSChunk):
-    SIGNATURE = b'LVS1'
-
-    def __init__(self, palette, font, animations):
+class LVSFile():
+    def __init__(self, palette, tileset, animations):
         self.palette = palette
-        self.font = font
+        self.tileset = tileset
         self.animations = animations
 
     def validate(self):
         if self.palette:
             self.palette.validate()
-        if self.font:
-            self.font.validate()
+        if self.tileset:
+            self.tileset.validate()
         for anim in self.animations:
             anim.validate(self)
 
-    def body_to_bytes(self):
+    def to_bytes(self):
         data = bytes()
         if self.palette:
             data += self.palette.to_bytes()
-        if self.font:
-            data += self.font.to_bytes()
+        if self.tileset:
+            data += self.tileset.to_bytes()
         for anim in self.animations:
             data += anim.to_bytes()
+            for frame in anim.frames:
+                data += frame.to_bytes()
         return data
 
     def dump(self, dumper):
         if self.palette:
             dumper.print('Palette:')
             self.palette.dump(dumper.inner())
-        if self.font:
-            dumper.print('Font:')
-            self.font.dump(dumper.inner())
+        if self.tileset:
+            dumper.print('Tileset:')
+            self.tileset.dump(dumper.inner())
         for i, anim in enumerate(self.animations):
             dumper.print(f'Animation {i}:')
             anim.dump(dumper.inner())
@@ -331,33 +327,33 @@ class LVSFile(LVSChunk):
 
         if not self.palette:
             raise ValueError(f'Palette not found')
-        if not self.font:
-            raise ValueError(f'Font not found')
+        if not self.tileset:
+            raise ValueError(f'Tileset not found')
         if not self.animations:
             raise ValueError(f'No animation found')
 
         anim = self.animations[0]
-        scaled_cell_width = scale * anim.cell_width
-        scaled_cell_height = scale * anim.cell_height
-        screen = Screen(anim.grid_width, anim.grid_height)
+        scaled_cell_width = scale * self.tileset.original_width
+        scaled_cell_height = scale * self.tileset.original_height
+        screen = Screen(anim.width, anim.height)
         images = []
         for frame in anim.frames:
-            image = Image.new('P', (anim.grid_width * scaled_cell_width,
-                                    anim.grid_height * scaled_cell_height))
+            image = Image.new('P', (anim.width * scaled_cell_width,
+                                    anim.height * scaled_cell_height))
             image.putpalette(self.palette.colors_to_bytes())
             writer = ScreenWriter(screen)
             for command in frame.commands:
                 command.execute(writer)
-            for row in range(anim.grid_height):
-                for column in range(anim.grid_width):
-                    bg, fg, ch = screen.get(screen.index(column, row))
-                    bg = 0 if (bg == Screen.TRANSPARENT_BG) else bg
-                    char = self.font.get_char(ch)
+            for row in range(anim.height):
+                for column in range(anim.width):
+                    background, foreground, _, tile = screen.get(screen.index(column, row))
+                    background = 0 if (background == Screen.TRANSPARENT_BACKGROUND) else background
+                    tile = self.tileset.get(tile)
                     for cell_y in range(scaled_cell_height):
-                        char_y = (cell_y * self.font.height) // scaled_cell_height
+                        tile_y = (cell_y * self.tileset.height) // scaled_cell_height
                         for cell_x in range(scaled_cell_width):
-                            char_x = (cell_x * self.font.width) // scaled_cell_width
-                            color = fg if char.get(char_x, char_y) else bg
+                            tile_x = (cell_x * self.tileset.width) // scaled_cell_width
+                            color = foreground if tile.get(tile_x, tile_y) else background
                             image.putpixel((column * scaled_cell_width + cell_x, row * scaled_cell_height + cell_y), color)
             images.append(image)
 
@@ -370,7 +366,7 @@ class LVSFile(LVSChunk):
         )
 
     @classmethod
-    def from_lvl(cls, tree):
+    def from_lvl(cls, tree, tile_size=None):
         if tree['version'] != 1:
             raise ValueError(f"Unexpected version: {tree['version']}")
 
@@ -380,52 +376,64 @@ class LVSFile(LVSChunk):
             palette = None
 
         if 'tileSet' in tree:
-            font = LVSFont.from_lvl(tree['tileSet'])
+            tileset = LVSTileset.from_lvl(tree['tileSet'], tile_size)
         else:
-            font = None
+            tileset = None
 
         if 'tileMap' in tree:
             animations = [LVSAnimation.from_lvl(tree['tileMap'])]
         else:
             animations = []
 
-        return cls(palette, font, animations)
+        return cls(palette, tileset, animations)
 
     @classmethod
-    def decode(cls, slicer):
+    def from_bytes(cls, data):
         palette = None
-        font = None
+        tileset = None
         animations = []
+        slicer = Slicer(data)
 
-        for chunk in lvs_decode(slicer, [LVSPalette, LVSFont, LVSAnimation]):
+        for chunk in lvs_decode(slicer, [LVSPalette, LVSTileset, LVSAnimation, LVSFrame]):
             if isinstance(chunk, LVSPalette):
                 if palette:
                     raise ValueError('More than one palette')
                 palette = chunk
-            elif isinstance(chunk, LVSFont):
-                if font:
-                    raise ValueError('More than one font')
-                font = chunk
+            elif isinstance(chunk, LVSTileset):
+                if tileset:
+                    raise ValueError('More than one tileset')
+                tileset = chunk
             elif isinstance(chunk, LVSAnimation):
                 animations.append(chunk)
+            elif isinstance(chunk, LVSFrame):
+                if not animations:
+                    raise ValueError('Frame without animation')
+                animations[-1].frames.append(chunk)
             else:
                 raise ValueError('Unexpected chunk: {type(chunk)}')
 
-        return cls(palette, font, animations)
+        return cls(palette, tileset, animations)
 
-    @classmethod
-    def from_file(cls, path):
-        with open(path, 'rb') as f:
-            slicer = Slicer(f.read())
-        files = lvs_decode(slicer, [cls])
-        if not files:
-            raise ValueError('Empty file')
-        files[0].validate()
-        return files[0]
+class LVSChunk:
+    '''Base class, do not instantiate'''
+
+    CHUNK_STRUCT = struct.Struct('> 2s H')
+
+    def body_to_bytes(self):
+        raise NotImplementedError()
+
+    def to_bytes(self):
+        body = self.body_to_bytes()
+
+        # Add padding if odd size
+        if len(body) & 1:
+            body += b'\x00'
+
+        return self.CHUNK_STRUCT.pack(self.SIGNATURE, self.CHUNK_STRUCT.size + len(body)) + body
 
 class LVSPalette(LVSChunk):
-    SIGNATURE = b'PALE'
-    STRUCT = struct.Struct('> H')
+    SIGNATURE = b'P1'
+    STRUCT = struct.Struct('B')
 
     def __init__(self, bitplanes, colors):
         self.bitplanes = bitplanes
@@ -495,74 +503,88 @@ class LVSColor:
     def decode(cls, slicer):
         return cls(*slicer.unpack(cls.STRUCT))
 
-class LVSFont(LVSChunk):
-    SIGNATURE = b'FONT'
-    STRUCT = struct.Struct('> H H H H H')
+class LVSTileset(LVSChunk):
+    SIGNATURE = b'T1'
+    STRUCT = struct.Struct('B B B B B B B')
 
-    def __init__(self, width, height, stride, begin, end, chars):
+    def __init__(self, width, height, original_width, original_height, stride, first, last, tiles):
         self.width = width
         self.height = height
+        self.original_width = original_width
+        self.original_height = original_height
         self.stride = stride
-        self.begin = begin
-        self.end = end
-        self.chars = chars
+        self.first = first
+        self.last = last
+        self.tiles = tiles
 
     def validate(self):
         if self.width < 1:
-            raise ValueError(f'Illegal font width: {self.width}')
+            raise ValueError(f'Illegal tileset width: {self.width}')
         if self.height < 1:
-            raise ValueError(f'Illegal font height: {self.height}')
+            raise ValueError(f'Illegal tileset height: {self.height}')
+        if self.original_width < 1:
+            raise ValueError(f'Illegal tileset original_width: {self.original_width}')
+        if self.original_height < 1:
+            raise ValueError(f'Illegal tileset original_height: {self.original_height}')
         if self.stride < 1:
-            raise ValueError(f'Illegal font stride: {self.stride}')
+            raise ValueError(f'Illegal tileset stride: {self.stride}')
         if self.stride * 8 < self.width:
-            raise ValueError(f'Font stride {self.stride} too small for width {self.width}')
-        if self.begin < 0 or self.begin > 256:
-            raise ValueError(f'Illegal font begin index: {self.begin}')
-        if self.end < 0 or self.end > 256 or self.end < self.begin:
-            raise ValueError(f'Illegal font end index: {self.end}')
-        if len(self.chars) != self.end - self.begin:
-            raise ValueError(f'Expected {self.end - self.begin} font characters, got {len(self.chars)}')
+            raise ValueError(f'Tileset stride {self.stride} too small for width {self.width}')
+        if self.first < 0 or self.first > 255:
+            raise ValueError(f'Illegal tileset first index: {self.first}')
+        if self.last < 0 or self.last > 255 or self.last < self.first:
+            raise ValueError(f'Illegal tileset last index: {self.last}')
+        if len(self.tiles) != self.last + 1 - self.first:
+            raise ValueError(f'Expected {self.last + 1 - self.first} tiles, got {len(self.tiles)}')
 
     def body_to_bytes(self):
-        return (self.STRUCT.pack(self.width, self.height, self.stride, self.begin, self.end) +
-                b''.join(char.to_bytes() for char in self.chars))
+        return (self.STRUCT.pack(self.width, self.height, self.original_width, self.original_height, self.stride, self.first, self.last) +
+                b''.join(tile.to_bytes() for tile in self.tiles))
 
     def dump(self, dumper):
         dumper.print(f'Width: {self.width}')
         dumper.print(f'Height: {self.height}')
+        dumper.print(f'Original width: {self.original_width}')
+        dumper.print(f'Original height: {self.original_height}')
         dumper.print(f'Stride: {self.stride}')
-        dumper.print(f'Begin: {self.begin}')
-        dumper.print(f'End: {self.end}')
+        dumper.print(f'First: {self.first}')
+        dumper.print(f'Last: {self.last}')
         if dumper.verbose:
-            for i, char in enumerate(self.chars):
-                dumper.print(f'Character {self.begin + i}:')
-                char.dump(dumper.inner())
+            for i, tile in enumerate(self.tiles):
+                dumper.print(f'Tile {self.first + i}:')
+                tile.dump(dumper.inner())
 
-    def get_char(self, code):
-        return self.chars[code - self.begin]
+    def get(self, code):
+        return self.tiles[code - self.first]
 
     @classmethod
-    def from_lvl(cls, tree):
+    def from_lvl(cls, tree, tile_size=None):
         if tree['version'] != 1:
             raise ValueError(f"Unexpected version: {tree['version']}")
-        width = tree['width']
-        height = tree['height']
+        original_width = tree['width']
+        original_height = tree['height']
+        if tile_size:
+            width = tile_size[0]
+            height = tile_size[1]
+        else:
+            width = original_width
+            height = original_height
         num_tiles = len(tree['tiles'])
         if num_tiles != 256:
             raise ValueError(f"Unexpected number of tiles: {num_tiles}")
-        begin = 0
-        end = 256
+        first = 0
+        last = 255
         stride = (width + 7) // 8
-        chars = [LVSCharacter.from_lvl(tile, width, height, stride) for tile in tree['tiles']]
-        return cls(width, height, stride, begin, end, chars)
+        tiles = [LVSTile.from_lvl(tile, width, height, original_width, original_height, stride) for tile in tree['tiles']]
+        return cls(width, height, original_width, original_height, stride, first, last, tiles)
 
     @classmethod
     def decode(cls, slicer):
-        width, height, stride, begin, end = slicer.unpack(cls.STRUCT)
-        chars = [LVSCharacter.decode(slicer, stride, height) for i in range(end - begin)]
-        return cls(width, height, stride, begin, end, chars)
+        width, height, original_width, original_height, stride, first, last = slicer.unpack(cls.STRUCT)
+        tiles = [LVSTile.decode(slicer, stride, height) for i in range(last + 1 - first)]
+        return cls(width, height, original_width, original_height, stride, first, last, tiles)
 
-class LVSCharacter:
+class LVSTile:
     def __init__(self, stride, height, data=None):
         self.stride = stride
         self.height = height
@@ -586,65 +608,55 @@ class LVSCharacter:
         self.data[y * self.stride + x // 8] |= bit << (7 - (x & 7))
 
     @classmethod
-    def from_lvl(cls, tree, width, height, stride):
-        char = cls(stride, height)
+    def from_lvl(cls, tree, width, height, original_width, original_height, stride):
+        tile = cls(stride, height)
         for y in range(height):
+            orig_y = (y * original_height) // height
             for x in range(width):
-                char.set(x, y, tree['data'][0][y * width + x])
-        return char
+                orig_x = (x * original_width) // width
+                tile.set(x, y, tree['data'][0][orig_y * width + orig_x])
+        return tile
 
     @classmethod
     def decode(cls, slicer, stride, height):
         return cls(stride, height, slicer.take(stride * height))
 
 class LVSAnimation(LVSChunk):
-    SIGNATURE = b'ANIM'
-    STRUCT = struct.Struct('> H H H H H')
+    SIGNATURE = b'A1'
+    STRUCT = struct.Struct('B B B')
 
-    def __init__(self, grid_width, grid_height, cell_width, cell_height, loops, frames):
-        self.grid_width = grid_width
-        self.grid_height = grid_height
-        self.cell_width = cell_width
-        self.cell_height = cell_height
+    def __init__(self, width, height, loops, frames):
+        self.width = width
+        self.height = height
         self.loops = loops
         self.frames = frames
 
     def num_cells(self):
-        return self.grid_width * self.grid_height
+        return self.width * self.height
 
     def validate(self, file):
-        first_animation = file.animations[0]
-
-        if self.grid_width < 1:
-            raise ValueError(f'Illegal grid width: {self.grid_width}')
-        if self.grid_width != first_animation.grid_width:
-            raise ValueError(f'Expected grid width {first_animation.grid_width}, got {self.grid_width}')
-        if self.grid_height < 1:
-            raise ValueError(f'Illegal grid height: {self.grid_height}')
-        if self.grid_height != first_animation.grid_height:
-            raise ValueError(f'Expected grid height {first_animation.grid_height}, got {self.grid_height}')
-        if self.cell_width < 1:
-            raise ValueError(f'Illegal cell width: {self.cell_width}')
-        if self.cell_height < 1:
-            raise ValueError(f'Illegal cell height: {self.cell_height}')
+        if self.width < 1:
+            raise ValueError(f'Illegal width: {self.width}')
+        if self.height < 1:
+            raise ValueError(f'Illegal height: {self.height}')
         if self.loops < 0:
             raise ValueError(f'Illegal number of loops: {self.loops}')
         for frame in self.frames:
-            frame.validate(file)
+            frame.validate(file, self)
 
     def body_to_bytes(self):
-        return (self.STRUCT.pack(self.grid_width, self.grid_height, self.cell_width, self.cell_height, self.loops) +
-                b''.join(frame.to_bytes() for frame in self.frames))
+        return self.STRUCT.pack(self.width, self.height, self.loops)
 
     def dump(self, dumper):
-        dumper.print(f'Grid width: {self.grid_width}')
-        dumper.print(f'Grid height: {self.grid_height}')
-        dumper.print(f'Cell width: {self.cell_width}')
-        dumper.print(f'Cell height: {self.cell_height}')
+        dumper.print(f'Width: {self.width}')
+        dumper.print(f'Height: {self.height}')
         dumper.print(f'Loops: {self.loops}')
-        for i, frame in enumerate(self.frames):
-            dumper.print(f'Frame {i}:')
-            frame.dump(dumper.inner())
+        if dumper.verbose:
+            for i, frame in enumerate(self.frames):
+                dumper.print(f'Frame {i}:')
+                frame.dump(dumper.inner())
+        else:
+            dumper.print(f'Frames: {len(self.frames)}')
 
     @classmethod
     def from_lvl(cls, tree):
@@ -656,15 +668,13 @@ class LVSAnimation(LVSChunk):
             if len(layer['frames']) != len(tree['frames']):
                 raise ValueError(f"Expected {len(tree['frames'])} frames in layer {i}, got {len(layer['frames'])}")
             if i:
-                if layer['gridWidth'] != grid_width:
-                    raise ValueError(f"Expected gridWidth {grid_width} in layer {i}, got {layer['gridWidth']}")
-                if layer['gridHeight'] != grid_height:
-                    raise ValueError(f"Expected gridHeight {grid_height} in layer {i}, got {layer['gridHeight']}")
+                if layer['gridWidth'] != width:
+                    raise ValueError(f"Expected gridWidth {width} in layer {i}, got {layer['gridWidth']}")
+                if layer['gridHeight'] != height:
+                    raise ValueError(f"Expected gridHeight {height} in layer {i}, got {layer['gridHeight']}")
             else:
-                grid_width = layer['gridWidth']
-                grid_height = layer['gridHeight']
-                cell_width = layer['cellWidth']
-                cell_height = layer['cellHeight']
+                width = layer['gridWidth']
+                height = layer['gridHeight']
 
         frames = []
         prev_screen = None
@@ -680,8 +690,13 @@ class LVSAnimation(LVSChunk):
                 layer_frame = layer['frames'][i]
                 # bg_color = layer_frame['bgColor']
                 # border_color = layer_frame['borderColor']
+                match = re.fullmatch(r' *tag +(\d+) *', layer['label'], re.IGNORECASE)
+                if match:
+                    tag = int(match.group(1)) & 0x1f
+                else:
+                    tag = 0
 
-                layer_screen = Screen.from_lvl(layer_frame, grid_width, grid_height)
+                layer_screen = Screen.from_lvl(layer_frame, width, height, tag)
                 if j:
                     # Transparent layer
                     screen.apply(layer_screen)
@@ -695,34 +710,30 @@ class LVSAnimation(LVSChunk):
 
             prev_screen = screen
 
-        return cls(grid_width, grid_height, cell_width, cell_height, 0, frames)
+        return cls(width, height, 0, frames)
 
     @classmethod
     def decode(cls, slicer):
-        grid_width, grid_height, cell_width, cell_height, loops = slicer.unpack(cls.STRUCT)
-        frames = lvs_decode(slicer, [LVSFrame])
-
-        return cls(grid_width, grid_height, cell_width, cell_height, loops, frames)
+        width, height, loops = slicer.unpack(cls.STRUCT)
+        return cls(width, height, loops, [])
 
 class LVSFrame(LVSChunk):
-    SIGNATURE = b'FRAM'
+    SIGNATURE = b'F1'
     STRUCT = struct.Struct('> H')
 
     def __init__(self, duration, commands):
         self.duration = duration
         self.commands = commands
 
-    def validate(self, file):
-        first_animation = file.animations[0]
-
+    def validate(self, file, animation):
         if self.duration < 1:
             raise ValueError(f'Illegal frame duration: {self.duration}')
         index = 0
         for cmd in self.commands:
             cmd.validate(file)
             index += cmd.cells()
-        if index != first_animation.num_cells():
-            raise ValueError(f'Frame encodes {index} cells, expected {first_animation.num_cells()}')
+        if index != animation.num_cells():
+            raise ValueError(f'Frame encodes {index} cells, expected {animation.num_cells()}')
 
     def body_to_bytes(self):
         return (self.STRUCT.pack(self.duration) +
@@ -755,6 +766,8 @@ def lvs_command_decode(slicer):
             commands.append(LVSCommandBackground(value))
         elif opcode == LVSCommandForeground.OPCODE:
             commands.append(LVSCommandForeground(value))
+        elif opcode == LVSCommandTag.OPCODE:
+            commands.append(LVSCommandTag(value))
         elif opcode == LVSCommandSkip.OPCODE:
             if value & 0x10:
                 value = (value & 0x0f) << 8 | slicer.take_byte()
@@ -791,34 +804,39 @@ class LVSCommand:
             raise ValueError(f'Color {color} exceeds maximum {file.palette.maximum_color()}')
 
     @classmethod
-    def validate_char(cls, char, file):
-        if file.font and (char < file.font.begin or char >= file.font.end):
-            raise ValueError(f'Char {char} outside range [{font.begin}, {font.end}) of font')
+    def validate_tiles(cls, data, file):
+        for tile in data:
+            if file.tileset and (tile < file.tileset.first or tile > file.tileset.last):
+                raise ValueError(f'Tile {tile} outside range [{tileset.first}, {tileset.last}] of tileset')
 
-    @classmethod
-    def encode_with_5_bit_value(cls, value):
-        if value < 0x20:
-            return struct.pack('B', cls.OPCODE << 5 | value)
+class LVSShortCommand(LVSCommand):
+    def __init__(self, value):
+        self.value = value
+
+    def to_bytes(self):
+        if self.value < 0x20:
+            return struct.pack('B', self.OPCODE << 5 | self.value)
         else:
-            raise ValueError(f'Too large value: {value}')
+            raise ValueError(f'Too large value: {self.value}')
 
-    @classmethod
-    def encode_with_12_bit_value(cls, value):
-        if value < 0x10:
-            return struct.pack('B', cls.OPCODE << 5 | value)
-        elif value < 0x1000:
-            return struct.pack('B B', cls.OPCODE << 5 | 0x10 | value >> 8, value & 0xff)
+class LVSLongCommand(LVSCommand):
+    def __init__(self, value, data):
+        self.value = value
+        self.data = data
+
+    def to_bytes(self):
+        if self.value < 0x10:
+            return struct.pack('B', self.OPCODE << 5 | self.value) + self.data
+        elif self.value < 0x1000:
+            return struct.pack('B B', self.OPCODE << 5 | 0x10 | self.value >> 8, self.value & 0xff) + self.data
         else:
-            raise ValueError(f'Too large value: {value}')
+            raise ValueError(f'Too large value: {self.value}')
 
-class LVSCommandTransparent(LVSCommand):
+class LVSCommandTransparent(LVSShortCommand):
     OPCODE = 0
 
     def __init__(self):
-        pass
-
-    def to_bytes(self):
-        return self.encode_with_5_bit_value(0)
+        super().__init__(0)
 
     def validate(self, file):
         pass
@@ -832,116 +850,117 @@ class LVSCommandTransparent(LVSCommand):
     def execute(self, writer):
         writer.set_transparent()
 
-class LVSCommandBackground(LVSCommand):
+class LVSCommandBackground(LVSShortCommand):
     OPCODE = 1
 
     def __init__(self, color):
-        self.color = color
-
-    def to_bytes(self):
-        return self.encode_with_5_bit_value(self.color)
+        super().__init__(color)
 
     def validate(self, file):
-        self.validate_color(self.color, file)
+        self.validate_color(self.value, file)
 
     def cells(self):
         return 0
 
     def dump(self, dumper):
-        dumper.print(f'Background (Color: {self.color})')
+        dumper.print(f'Background ({self.value})')
 
     def execute(self, writer):
-        writer.set_background(self.color)
+        writer.set_background(self.value)
 
-class LVSCommandForeground(LVSCommand):
+class LVSCommandForeground(LVSShortCommand):
     OPCODE = 2
 
     def __init__(self, color):
-        self.color = color
-
-    def to_bytes(self):
-        return self.encode_with_5_bit_value(self.color)
+        super().__init__(color)
 
     def validate(self, file):
-        self.validate_color(self.color, file)
+        self.validate_color(self.value, file)
 
     def cells(self):
         return 0
 
     def dump(self, dumper):
-        dumper.print(f'Foreground (Color: {self.color})')
+        dumper.print(f'Foreground ({self.value})')
 
     def execute(self, writer):
-        writer.set_foreground(self.color)
+        writer.set_foreground(self.value)
 
-class LVSCommandSkip(LVSCommand):
+class LVSCommandTag(LVSShortCommand):
     OPCODE = 3
 
-    def __init__(self, count):
-        self.count = count
-
-    def to_bytes(self):
-        return self.encode_with_12_bit_value(self.count)
+    def __init__(self, tag):
+        super().__init__(tag)
 
     def validate(self, file):
         pass
 
     def cells(self):
-        return self.count + 1
+        return 0
 
     def dump(self, dumper):
-        dumper.print(f'Skip (Count: {self.count})')
+        dumper.print(f'Tag ({self.value})')
 
     def execute(self, writer):
-        writer.skip(self.count + 1)
+        writer.set_tag(self.value)
 
-class LVSCommandFill(LVSCommand):
+class LVSCommandSkip(LVSLongCommand):
     OPCODE = 4
 
-    def __init__(self, count, char):
-        self.count = count
-        self.char = char
-
-    def to_bytes(self):
-        return self.encode_with_12_bit_value(self.count) + bytes([self.char])
+    def __init__(self, count):
+        super().__init__(count, bytes())
 
     def validate(self, file):
-        self.validate_char(self.char, file)
+        pass
 
     def cells(self):
-        return self.count + 1
+        return self.value + 1
 
     def dump(self, dumper):
-        dumper.print(f'Fill (Count: {self.count}, Char: {self.char}, Text: "{safe_chr(self.char)}")')
+        dumper.print(f'Skip (Count: {self.value})')
 
     def execute(self, writer):
-        for i in range(self.count + 1):
-            writer.write(self.char)
+        writer.skip(self.value + 1)
 
-class LVSCommandRun(LVSCommand):
+class LVSCommandFill(LVSLongCommand):
     OPCODE = 5
 
-    def __init__(self, data):
-        self.data = data
-
-    def to_bytes(self):
-        return self.encode_with_12_bit_value(len(self.data) - 1) + self.data
+    def __init__(self, count, tile):
+        super().__init__(count, bytes([tile]))
 
     def validate(self, file):
-        if not self.data:
+        self.validate_tiles(self.data, file)
+
+    def cells(self):
+        return self.value + 1
+
+    def dump(self, dumper):
+        dumper.print(f'Fill (Count: {self.value}, Tile: {self.data[0]}, Text: "{safe_chr(self.data[0])}")')
+
+    def execute(self, writer):
+        for i in range(self.value + 1):
+            writer.write(self.data[0])
+
+class LVSCommandRun(LVSLongCommand):
+    OPCODE = 6
+
+    def __init__(self, data):
+        if not data:
             raise ValueError(f'No data')
-        for char in self.data:
-            self.validate_char(char, file)
+        super().__init__(len(data) - 1, data)
+
+    def validate(self, file):
+        self.validate_tiles(self.data, file)
 
     def cells(self):
         return len(self.data)
 
     def dump(self, dumper):
-        dumper.print(f'Run (Chars: {str(list(self.data))}, Text: "{"".join(safe_chr(c) for c in self.data)}")')
+        dumper.print(f'Run (Tiles: {str(list(self.data))}, Text: "{"".join(safe_chr(c) for c in self.data)}")')
 
     def execute(self, writer):
-        for char in self.data:
-            writer.write(char)
+        for tile in self.data:
+            writer.write(tile)
 
 #
 # LVL parsing
@@ -1018,133 +1037,25 @@ def lvl_dump(tree, verbose):
     else:
         print('No tilemap found!')
 
-def lvl_import(tree, alignment):
-    if tree['version'] != 1:
-        raise ValueError(f"Unexpected version {tree['version']}")
-
-    if 'colorPalette' in tree:
-        if tree['colorPalette']['version'] != 1:
-            raise ValueError(f"Unexpected colorPalette version {tree['colorPalette']['version']}")
-        num_colors = len(tree['colorPalette']['data'])
-        if num_colors < 2:
-            raise ValueError(f"Too few colors")
-        elif num_colors == 2:
-            bitplanes = 1
-        elif num_colors <= 4:
-            bitplanes = 2
-        elif num_colors <= 8:
-            bitplanes = 3
-        elif num_colors <= 16:
-            bitplanes = 4
-        elif num_colors <= 32:
-            bitplanes = 5
-        else:
-            raise ValueError(f"Too many colors")
-        colors = []
-        for i in range(1 << bitplanes):
-            if i < num_colors:
-                _, r, g, b = lvl_decode_color(tree['colorPalette']['data'][i])
-                colors.append(LVSColor(r, g, b))
-            else:
-                colors.append(LVSColor(0, 0, 0))
-        palette = LVSPalette(colors)
-    else:
-        palette = None
-
-    if 'tileSet' in tree:
-        if tree['tileSet']['version'] != 1:
-            raise ValueError(f"Unexpected tileSet version {tree['tileSet']['version']}")
-        font_width = tree['tileSet']['width']
-        font_height = tree['tileSet']['height']
-        num_tiles = len(tree['tileSet']['tiles'])
-        if num_tiles != 256:
-            raise ValueError(f"Unexpected number of tiles: {num_tiles}")
-        font_begin = 0
-        font_end = 256
-        font_stride = ((font_width + aligment - 1) // alignment) // 8
-        font_data = bytearray(num_tiles * font_height * font_stride)
-        for t in range(num_tiles):
-            for y in range(font_height):
-                for x in range(font_width):
-                    if tree['tileSet']['tiles'][t]['data'][0][y * w + x]:
-                        font_data[(t * font_height + y) * font_stride + x // 8] |= 0x80 >> (x & 7)
-        font = LVSFont(font_width, font_height, font_stride, font_begin, font_end, font_data)
-    else:
-        font = None
-
-    if 'tileMap' in tree:
-        if not tree['tileMap']['layers']:
-            raise ValueError(f"No layers in tileMap")
-
-        for i, layer in enumerate(tree['tileMap']['layers']):
-            if len(layer['frames']) != len(tree['tileMap']['frames']):
-                raise ValueError(f"Unexpected number of frames in layer {i}: {len(layer['frames'])}")
-            if i:
-                if layer['gridWidth'] != grid_width:
-                    raise ValueError(f"Unexpected gridWidth in layer {i}: {layer['gridWidth']}")
-                if layer['gridHeight'] != grid_height:
-                    raise ValueError(f"Unexpected gridHeight in layer {i}: {layer['gridHeight']}")
-            else:
-                grid_width = layer['gridWidth']
-                grid_height = layer['gridHeight']
-                text_buffer = TextBuffer(grid_width, grid_height)
-
-        print('Tilemap:')
-        print('  Number of frames:', len(tree['tileMap']['frames']))
-        durations = [f['duration'] for f in tree['tileMap']['frames']]
-        print('  Durations:', durations)
-        print('  Total duration:', sum(durations))
-        print('  Layers:')
-        for i, layer in enumerate(tree['tileMap']['layers']):
-            print('    Label:', layer['label'])
-            print('    Grid width:', layer['gridWidth'])
-            print('    Grid height:', layer['gridHeight'])
-            print('    Cell width:', layer['cellWidth'])
-            print('    Cell height:', layer['cellHeight'])
-            print('    Screen width:', layer['gridWidth'] * layer['cellWidth'])
-            print('    Screen height:', layer['gridHeight'] * layer['cellHeight'])
-            print('    Number of frames:', len(layer['frames']))
-            if verbose:
-                print('    Frames:')
-                for j, frame in enumerate(layer['frames']):
-                    print(f'      Index: {j}, Background color: {frame["bgColor"]}, Border color: {frame["borderColor"]}')
-                    print('      Tile:')
-                    for row in frame['data']:
-                        line = ''.join(safe_chr(col['t']) for col in row)
-                        print(f'        [{line}]')
-                    print('      Foreground color:')
-                    for row in frame['data']:
-                        line = ''.join('%2d' % col['fc'] for col in row)
-                        print(f'        {line}')
-                    print('      Background color:')
-                    for row in frame['data']:
-                        line = ''.join('%2d' % col['bc'] for col in row)
-                        print(f'        {line}')
-    else:
-        raise ValueError(f"No tileMap found")
-
 #
 # Commands
 #
 
 def cmd_dump(args):
-    dumper = Dumper(True)
     with open(args.LVS_FILE, 'rb') as f:
-        slicer = Slicer(f.read())
-    for i, file in enumerate(lvs_decode(slicer, [LVSFile])):
-        dumper.print(f'File {i}:')
-        file.dump(dumper.inner())
+        file = LVSFile.from_bytes(f.read())
+    file.dump(Dumper(True))
 
 def cmd_gif_export(args):
-    LVSFile.from_file(args.LVS_FILE).export_gif(args.GIF_FILE, args.scale)
+    with open(args.LVS_FILE, 'rb') as f:
+        file = LVSFile.from_bytes(f.read())
+    file.validate()
+    file.export_gif(args.GIF_FILE, args.scale)
 
 def cmd_info(args):
-    dumper = Dumper(False)
     with open(args.LVS_FILE, 'rb') as f:
-        slicer = Slicer(f.read())
-    for i, file in enumerate(lvs_decode(slicer, [LVSFile])):
-        dumper.print(f'File {i}:')
-        file.dump(dumper.inner())
+        file = LVSFile.from_bytes(f.read())
+    file.dump(Dumper(False))
 
 def cmd_lvl_dump(args):
     with open(args.LVL_FILE) as f:
@@ -1154,7 +1065,7 @@ def cmd_lvl_dump(args):
 def cmd_lvl_import(args):
     with open(args.LVL_FILE) as f:
         tree = json.load(f)
-    lvs = LVSFile.from_lvl(tree)
+    lvs = LVSFile.from_lvl(tree, args.tile_size)
     lvs.validate()
     with open(args.LVS_FILE, 'wb') as f:
         f.write(lvs.to_bytes())
@@ -1163,6 +1074,11 @@ def cmd_lvl_info(args):
     with open(args.LVL_FILE) as f:
         tree = json.load(f)
     lvl_dump(tree, False)
+
+def cmd_validate(args):
+    with open(args.LVS_FILE, 'rb') as f:
+        file = LVSFile.from_bytes(f.read())
+    file.validate()
 
 #
 # CLI
@@ -1191,6 +1107,7 @@ def main():
     subparser.set_defaults(func=cmd_lvl_dump)
 
     subparser = subparsers.add_parser('lvl-import', description='Convert lvllvl file to LVS.')
+    subparser.add_argument('-t', '--tile-size', type=int, nargs=2, metavar=('WIDTH', 'HEIGHT'), help='Resize tileset')
     subparser.add_argument('LVL_FILE', help='lvllvl project exported as JSON')
     subparser.add_argument('LVS_FILE', help='LVS file to create')
     subparser.set_defaults(func=cmd_lvl_import)
@@ -1198,6 +1115,10 @@ def main():
     subparser = subparsers.add_parser('lvl-info', description='Print summary of lvllvl file.')
     subparser.add_argument('LVL_FILE', help='lvllvl project exported as JSON')
     subparser.set_defaults(func=cmd_lvl_info)
+
+    subparser = subparsers.add_parser('validate', description='Validate LVS file.')
+    subparser.add_argument('LVS_FILE', help='LVS file')
+    subparser.set_defaults(func=cmd_validate)
 
     args = parser.parse_args()
     args.func(args)
