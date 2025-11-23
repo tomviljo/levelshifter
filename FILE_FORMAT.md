@@ -52,7 +52,7 @@ The header consists of one single-byte integer:
 Byte 0: BITPLANES: Number of bitplanes (between 1 and 5).
 ```
 
-The color data is an array of 2^BITPLANES colors, where a color consists of three single-byte integers:
+The color data is an array of 2 ^ BITPLANES colors, where a color consists of three single-byte integers:
 
 ```
 Byte 0: RED:   Red channel.
@@ -110,7 +110,8 @@ The body consists of a header and a series of commands.
 The header consists of a two-byte integer:
 
 ```
-Byte 0-1: DURATION: Number of PAL vertical blanks (20 ms) to wait before switching to the next frame, as a big-endian 16-bit integer.
+Byte 0-1: DURATION: Number of PAL vertical blanks (20 ms) to wait before switching to the next frame,
+                    as a big-endian 16-bit integer.
 ```
 
 Each command consists of one or more bytes. The three highest bits of the first byte in a command determine its type:
@@ -120,7 +121,7 @@ Bits 7-5: OPCODE: Type of command.
 Bits 4-0:         <Depends on OPCODE>
 ```
 
-There are seven types commands defined:
+There are seven types of commands defined:
 
 ```
 OPCODE  Command
@@ -346,7 +347,7 @@ This pseudocode file is an example of an indefinitely looping animation of 5 x 2
 
 ```
 Hex                Description
-----------------------------------
+---------------------------------------------------------------
 50 31              SIGNATURE "P1" (Palette)
 00 0C              LENGTH
 01                 BITPLANES
