@@ -333,8 +333,8 @@ class LVSFile():
             raise ValueError(f'No animation found')
 
         anim = self.animations[0]
-        scaled_cell_width = scale * self.tileset.original_width
-        scaled_cell_height = scale * self.tileset.original_height
+        scaled_cell_width = scale * self.tileset.square_width
+        scaled_cell_height = scale * self.tileset.square_height
         screen = Screen(anim.width, anim.height)
         images = []
         for frame in anim.frames:
@@ -507,11 +507,11 @@ class LVSTileset(LVSChunk):
     SIGNATURE = b'T1'
     STRUCT = struct.Struct('B B B B B B B')
 
-    def __init__(self, width, height, original_width, original_height, stride, first, last, tiles):
+    def __init__(self, width, height, square_width, square_height, stride, first, last, tiles):
         self.width = width
         self.height = height
-        self.original_width = original_width
-        self.original_height = original_height
+        self.square_width = square_width
+        self.square_height = square_height
         self.stride = stride
         self.first = first
         self.last = last
@@ -522,10 +522,10 @@ class LVSTileset(LVSChunk):
             raise ValueError(f'Illegal tileset width: {self.width}')
         if self.height < 1:
             raise ValueError(f'Illegal tileset height: {self.height}')
-        if self.original_width < 1:
-            raise ValueError(f'Illegal tileset original_width: {self.original_width}')
-        if self.original_height < 1:
-            raise ValueError(f'Illegal tileset original_height: {self.original_height}')
+        if self.square_width < 1:
+            raise ValueError(f'Illegal tileset square_width: {self.square_width}')
+        if self.square_height < 1:
+            raise ValueError(f'Illegal tileset square_height: {self.square_height}')
         if self.stride < 1:
             raise ValueError(f'Illegal tileset stride: {self.stride}')
         if self.stride * 8 < self.width:
@@ -538,14 +538,14 @@ class LVSTileset(LVSChunk):
             raise ValueError(f'Expected {self.last + 1 - self.first} tiles, got {len(self.tiles)}')
 
     def body_to_bytes(self):
-        return (self.STRUCT.pack(self.width, self.height, self.original_width, self.original_height, self.stride, self.first, self.last) +
+        return (self.STRUCT.pack(self.width, self.height, self.square_width, self.square_height, self.stride, self.first, self.last) +
                 b''.join(tile.to_bytes() for tile in self.tiles))
 
     def dump(self, dumper):
         dumper.print(f'Width: {self.width}')
         dumper.print(f'Height: {self.height}')
-        dumper.print(f'Original width: {self.original_width}')
-        dumper.print(f'Original height: {self.original_height}')
+        dumper.print(f'Square width: {self.square_width}')
+        dumper.print(f'Square height: {self.square_height}')
         dumper.print(f'Stride: {self.stride}')
         dumper.print(f'First: {self.first}')
         dumper.print(f'Last: {self.last}')
@@ -580,9 +580,9 @@ class LVSTileset(LVSChunk):
 
     @classmethod
     def decode(cls, slicer):
-        width, height, original_width, original_height, stride, first, last = slicer.unpack(cls.STRUCT)
+        width, height, square_width, square_height, stride, first, last = slicer.unpack(cls.STRUCT)
         tiles = [LVSTile.decode(slicer, stride, height) for i in range(last + 1 - first)]
-        return cls(width, height, original_width, original_height, stride, first, last, tiles)
+        return cls(width, height, square_width, square_height, stride, first, last, tiles)
 
 class LVSTile:
     def __init__(self, stride, height, data=None):
