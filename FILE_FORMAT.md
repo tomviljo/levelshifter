@@ -1,6 +1,6 @@
 # Levelshifter file format
 
-Levelshifter (LVS) is a file format and collection of tools for tile- or text-based animations.
+Levelshifter (LVS) is a file format and collection of tools for tile-based animations.
 
 This document aims to explain the format of LVS files and how to render them.
 
