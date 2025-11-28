@@ -18,7 +18,8 @@ A screen is a rectangular grid of tiles.
 
 A tile is a rectangular area of pixels which has a tileset index, a foreground color index, a background color index and a tag.
 
-Each pixel in a tile is either the foreground or background color from the palette, depending on the corresponding bit in the tile's bitmap in the tileset.
+Each pixel in a tile is either the foreground or background color from the palette,
+depending on the corresponding bit in the tile's bitmap in the tileset.
 
 A frame defines the tileset index, foreground color index and background color index for each tile.
 
@@ -147,8 +148,8 @@ FOREGROUND  Current foreground color  0 to 31                    N/A
 TAG         Current tag               0 to 31                    0
 ```
 
-INDEX is the index into the WIDTH * HEIGHT (from animation header) tiles on the screen when treated as a one-dimensional array,
-so that the minimum value is the top-left corner and the maximum value is the bottom-right corner.
+INDEX is the index into the WIDTH * HEIGHT (from animation header) tiles on the screen when treated as a one-dimensional
+array, so that the minimum value is the top-left corner and the maximum value is the bottom-right corner.
 
 BACKGROUND is the background color index to assign to upcoming tiles.
 TRANSPARENT is a special implementation-defined value which is used for layering.
@@ -266,12 +267,14 @@ Byte 2+:          TILE:     Tileset indices, COUNT + 1 bytes in total.
 
 Not every file which is constructed according to the specification above is valid and complete.
 
-A file which does not contain one palette, one tileset and at least one animation with at least one frame is not complete and cannot be used for rendering, even if it is valid.
+A file which does not contain one palette, one tileset and at least one animation with at least one frame is not complete
+and cannot be used for rendering, even if it is valid.
 However, it may be useful to keep incomplete files, such as a palette, for constructing a complete file out of parts.
 
 In a tileset, WIDTH must not be higher than STRIDE * 8.
 
-In a tileset, the index 32 (ASCII whitespace) should be included and consist entirely of the background color. This is not a requirement though.
+In a tileset, the index 32 (ASCII whitespace) should be included and consist entirely of the background color.
+This is not a requirement though.
 
 Currently, every animation in a file must have the same WIDTH and HEIGHT.
 
@@ -283,14 +286,15 @@ In a frame, a BACKGROUND or FOREGROUND command may not contain a COLOR outside t
 
 In a frame, a FILL or RUN command may not contain a TILE outside the range of the tileset.
 
-When decoding a frame, a FILL or RUN command may not appear before the BACKGROUND and FOREGROUND variables are set using the BACKGROUND or TRANSPARENT command and the FOREGROUND command.
+When decoding a frame, a FILL or RUN command may not appear before the BACKGROUND and FOREGROUND variables are set using the
+BACKGROUND or TRANSPARENT command and the FOREGROUND command.
 
 ## Rendering
 
 To render an animation, do the following:
 
-Create a display which is at least Animation.WIDTH * Tileset.WIDTH pixels wide and at least Animation.HEIGHT * Tileset.HEIGHT pixels high,
-and which supports at least 2 ^ Palette.BITPLANES colors.
+Create a display which is at least Animation.WIDTH * Tileset.WIDTH pixels wide and at least Animation.HEIGHT * Tileset.HEIGHT
+pixels high, and which supports at least 2 ^ Palette.BITPLANES colors.
 
 Allocate a buffer of Animation.WIDTH * Animation.HEIGHT tuples consisting of BACKGROUND, FOREGROUND, TAG and TILE.
 
@@ -302,7 +306,8 @@ Start a timer which ticks every vertical blank (20 ms).
 
 Every timer tick, increment the tick counter.
 
-Every time the tick counter reaches DURATION of the current frame, set the tick counter to zero, increment the frame counter and render the next frame.
+Every time the tick counter reaches DURATION of the current frame, set the tick counter to zero,
+increment the frame counter and render the next frame.
 
 Every time the frame index reaches the end of the animation, check Animation.LOOPS.
 If Animation.LOOPS is zero, set the frame counter to zero and keep rendering.
@@ -314,11 +319,12 @@ Otherwise, set the frame counter to zero and keep rendering.
 
 It is possible to render two or more animations as layers on the same screen, even updating at different frequencies.
 
-To do this, follow the previous section but allocate an intermediary buffer and set of counters for each animation and render them to each buffer in parallel.
+To do this, follow the previous section but allocate an intermediary buffer and set of counters for each animation
+and render them to each buffer in parallel.
 
 Also allocate a final buffer where all intermediary buffers are combined.
 
-When any intermediary buffer has changed, the final buffer needs to updated.
+When any intermediary buffer has changed, the final buffer needs to be updated.
 
 First, copy the intermediary buffer of the base layer to the final buffer.
 
@@ -330,7 +336,7 @@ For each subsequent layer, apply the following rules for each tile:
 
 * If the BACKGROUND value is TRANSPARENT and TILE is 32, do nothing.
 
-If after layering any tile in the final buffer has the BACKGROUND value TRANSPARENT, use zero instead.
+If, after layering, any tile in the final buffer has the BACKGROUND value TRANSPARENT, use zero instead.
 This can be avoided by setting a non-transparent background color in every tile of the base layer.
 
 ### Scripting
@@ -343,7 +349,8 @@ The TAG value in each tile can be used to apply special effects to selected port
 
 ## Example
 
-This pseudocode file is an example of an indefinitely looping animation of 5 x 2 tiles where the upper row says "Hello" and the lower row says "hello" in blinking text.
+This pseudocode file is an example of an indefinitely looping animation of 5 x 2 tiles where the upper row says "Hello"
+and the lower row says "world" in blinking text.
 
 ```
 Hex                Description
